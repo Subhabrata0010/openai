@@ -1,49 +1,71 @@
-const express = require('express');
-const axios = require('axios');
-const cohere = require('cohere-ai');
-const fs = require('fs');
-require('dotenv').config();
-const { MemoryVectorStore, splitText } = require('./vectorStore');
+import express from "express";
+import fs from "fs";
+import { CohereEmbeddings } from "@langchain/cohere";
+import { MemoryVectorStore } from "langchain/vectorstores/memory";
+import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
+import { RunnableSequence, RunnablePassthrough } from "@langchain/core/runnables";
+import { StringOutputParser } from "@langchain/core/output_parsers";
+import { ChatPromptTemplate } from "@langchain/core/prompts";
+import dotenv from "dotenv";
+dotenv.config();
+
 
 const app = express();
-const port = 3000;
+const port = 5000;
 
-app.use(express.json());
-cohere.init(process.env.COHERE_API_KEY);
-
-// Load and split the rulebook on server start
-const rulebookText = fs.readFileSync('./westin_rulebook.txt', 'utf8');
+// Read and prepare rulebook data
+const rulebookData = JSON.parse(fs.readFileSync("rulebook.json", "utf8"));
 let vectorStore = null;
 
-(async () => {
-  const chunks = splitText(rulebookText);
-  vectorStore = new MemoryVectorStore(chunks);
-  console.log('Vector store initialized with Westin Rulebook.');
-})();
+// Split documents for vector storage
+async function initializeVectorStore() {
+    const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000 });
+    const docs = await splitter.createDocuments(
+        rulebookData.map((section) => `${section.title}\n\n${section.content}`)
+    );
 
-// API Route to Query the Rulebook
-app.post('/api/ask', async (req, res) => {
-  const { question } = req.body;
+    // Initialize Cohere embeddings
+    vectorStore = await MemoryVectorStore.fromDocuments(docs, new CohereEmbeddings({
+        model: "embed-english-v3.0",
+        apiKey: process.env.COHERE_API_KEY  // Replace with your actual key
+    }));
+    console.log("Vector Store Initialized");
+}
 
-  if (!question) {
-    return res.status(400).json({ error: 'Question is required' });
-  }
+// Run the initialization when server starts
+initializeVectorStore();
 
-  try {
-    const context = vectorStore.retrieveRelevantChunks(question);
-    const response = await cohere.generate({
-      model: 'command',
-      prompt: `${context}\nQuestion: ${question}`,
-      max_tokens: 200,
-    });
+// Express route for querying the rulebook
+app.post("/api/ask", async (req, res) => {
+    const { question } = req.body;
+    if (!question) return res.status(400).send({ error: "Question is required" });
 
-    res.json({ answer: response.body.generations[0].text });
-  } catch (error) {
-    console.error('Error:', error.message);
-    res.status(500).json({ error: 'Failed to fetch response from Cohere' });
-  }
+    try {
+        const retriever = vectorStore.asRetriever();
+        const SYSTEM_TEMPLATE = `Use the context below to answer the question:\n{context}`;
+        
+        const prompt = ChatPromptTemplate.fromMessages([
+            ["system", SYSTEM_TEMPLATE],
+            ["human", "{question}"]
+        ]);
+
+        const model = new RunnableSequence([
+            {
+                context: retriever.pipe((docs) => docs.map(doc => doc.pageContent).join("\n\n")),
+                question: new RunnablePassthrough()
+            },
+            prompt,
+            new StringOutputParser()
+        ]);
+
+        const answer = await model.invoke(question);
+        res.json({ answer });
+    } catch (error) {
+        console.error("Error:", error);
+        res.status(500).send({ error: "Failed to process request" });
+    }
 });
 
 app.listen(port, () => {
-  console.log(`Server running at http://localhost:${port}`);
+    console.log(`Server running at http://localhost:${port}`);
 });
