@@ -19,8 +19,8 @@ function App() {
   };
 
   return (
-    <div className="container mx-auto p-10">
-      <h1 className="text-3xl font-bold mb-4">AI Q&A App</h1>
+    <div className="container mx-auto p-10 bg-slate-800">
+      <h1 className="text-3xl font-bold mb-4 text-cyan-200">AI Q&A App</h1>
       
       <form onSubmit={handleSubmit}>
         <textarea
